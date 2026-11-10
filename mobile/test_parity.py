@@ -19,6 +19,20 @@ class Request(C.Structure):
         "is_crawford", "jacoby", "beaver", "budget_ms")]
 
 
+def largest_difference(a, b):
+    """Two answers of the same shape: their largest numeric difference (all else equal)."""
+    if isinstance(a, dict):
+        assert sorted(a) == sorted(b)
+        return max([largest_difference(a[k], b[k]) for k in a], default=0.0)
+    if isinstance(a, list):
+        assert len(a) == len(b)
+        return max([largest_difference(x, y) for x, y in zip(a, b)], default=0.0)
+    if isinstance(a, (int, float)) and not isinstance(a, bool):
+        return abs(a - b)
+    assert a == b, (a, b)
+    return 0.0
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build", type=Path, required=True)
@@ -36,9 +50,16 @@ def main():
     lib.bgsage_mobile_create.restype = C.c_void_p
     lib.bgsage_mobile_analyze.argtypes = [C.c_void_p, C.c_int, C.POINTER(Request)]
     lib.bgsage_mobile_analyze.restype = C.c_void_p
+    lib.bgsage_mobile_analyze_play.argtypes = [C.c_void_p, C.POINTER(Request), C.POINTER(C.c_int)]
+    lib.bgsage_mobile_analyze_play.restype = C.c_void_p
     lib.bgsage_mobile_free.argtypes = [C.c_void_p]
     lib.bgsage_mobile_destroy.argtypes = [C.c_void_p]
     lib.bgsage_mobile_last_error.restype = C.c_char_p
+
+    def result(value):
+        if not value: return None
+        try: return json.loads(C.string_at(value))
+        finally: lib.bgsage_mobile_free(value)
     weights = default_weights()
     paths = (C.c_char_p * len(weights.weight_paths_list))(*[str(p).encode() for p in weights.weight_paths_list])
     hidden = (C.c_int * len(weights.hidden_sizes_list))(*weights.hidden_sizes_list)
@@ -92,6 +113,17 @@ def main():
                             assert got["eval_level"] == m["eval_level"]
                         if expected:
                             assert abs(actual["moves"][0]["equity"] - expected[0]["equity"]) < 1e-5
+                        # one play at a time: the same entry as in the full list
+                        for m in actual["moves"][:2]:
+                            one = result(lib.bgsage_mobile_analyze_play(handle, C.byref(request), (C.c_int * 26)(*m["board"])))
+                            assert one and len(one["moves"]) == 1, (index, ply, lib.bgsage_mobile_last_error())
+                            got = one["moves"][0]
+                            assert got["board"] == m["board"] and got["eval_level"] == m["eval_level"]
+                            errors = [abs(got[key]-m[key]) for key in ("equity", "cubeless_equity")]
+                            errors += [abs(a-b) for a, b in zip(got["probs"], m["probs"])]
+                            assert max(errors) < 1e-9, (index, ply, "play", errors)
+                        if board not in [m["board"] for m in actual["moves"]]:
+                            assert not lib.bgsage_mobile_analyze_play(handle, C.byref(request), (C.c_int * 26)(*board))
                     else:
                         expected = reference._analyzer.cube_action_analytics(board, **settings)
                         for key in ("should_double", "should_take", "is_beaver", "eval_level"):
@@ -105,11 +137,29 @@ def main():
         assert not lib.bgsage_mobile_analyze(handle, 0, C.byref(request))
         request.ply = 1; request.board[1] = 500
         assert not lib.bgsage_mobile_analyze(handle, 0, C.byref(request))
+        # an empty bearoff path builds the table in memory: the file's answers, but a
+        # fast-math build rounds a few of its 16-bit entries one step apart (~1e-4 equity)
+        generation_started = time.perf_counter()
+        generated = lib.bgsage_mobile_create(weights.strategy_type.encode(), paths, hidden, len(paths), b"")
+        generation_ms = (time.perf_counter() - generation_started) * 1000
+        assert generated, lib.bgsage_mobile_last_error()
+        generated_error = 0.0
+        try:
+            for ply in (1, 2):
+                for die1, die2 in ((3, 1), (6, 6), (2, 1)):
+                    request = Request((C.c_int * 26)(*bearoff), die1, die2, ply, 1, 0, 0, 0, 0, 1, 1, 1000)
+                    for operation in (0, 1):
+                        a, b = (result(lib.bgsage_mobile_analyze(h, operation, C.byref(request))) for h in (handle, generated))
+                        assert a and b, (ply, die1, die2, operation, lib.bgsage_mobile_last_error())
+                        generated_error = max(generated_error, largest_difference(a, b))
+        finally:
+            lib.bgsage_mobile_destroy(generated)
+        assert generated_error < 5e-4, generated_error
     finally:
         lib.bgsage_mobile_destroy(handle)
     print(json.dumps({"cases": cases, "max_absolute_error": max_error, "max_native_ms": max(timings),
         "median_native_ms": sorted(timings)[len(timings)//2], "model_initialization_ms": initialization_ms,
-        "reference": str(cpp.__file__), "binary": str(binary)}, indent=2))
+        "bearoff_generation_ms": generation_ms, "bearoff_generated_max_difference": generated_error, "reference": str(cpp.__file__), "binary": str(binary)}, indent=2))
 
 
 if __name__ == "__main__": main()

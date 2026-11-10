@@ -18,6 +18,15 @@
 #include <sstream>
 #include <stdexcept>
 
+// Request limits. A host without a cloud fallback (the WebAssembly build runs
+// in a worker) may raise them at build time.
+#ifndef BGSAGE_MOBILE_MAX_PLY
+#define BGSAGE_MOBILE_MAX_PLY 2
+#endif
+#ifndef BGSAGE_MOBILE_MAX_BUDGET_MS
+#define BGSAGE_MOBILE_MAX_BUDGET_MS 1000
+#endif
+
 using namespace bgbot;
 struct BgsageMobileEngine {
     BearoffDB db;
@@ -40,10 +49,10 @@ template<typename T, size_t N> void array(std::ostringstream& s, const std::arra
     s << ']';
 }
 void validate(const BgsageMobileRequest& r, int operation) {
-    if(operation<0 || operation>1 || r.ply<1 || r.ply>2 || r.cube_owner<0 || r.cube_owner>2 ||
+    if(operation<0 || operation>1 || r.ply<1 || r.ply>BGSAGE_MOBILE_MAX_PLY || r.cube_owner<0 || r.cube_owner>2 ||
        r.cube_value<1 || r.cube_value>32768 || (r.cube_value & (r.cube_value-1)) ||
        r.away1<0 || r.away2<0 || r.away1>25 || r.away2>25 ||
-       ((r.away1==0)!=(r.away2==0)) || r.budget_ms<1 || r.budget_ms>1000 ||
+       ((r.away1==0)!=(r.away2==0)) || r.budget_ms<1 || r.budget_ms>BGSAGE_MOBILE_MAX_BUDGET_MS ||
        (operation==0 && (r.die1<1 || r.die1>6 || r.die2<1 || r.die2>6)))
         throw std::invalid_argument("unsupported request");
     int player=r.board[25], opponent=r.board[0];
@@ -70,7 +79,8 @@ extern "C" BgsageMobileEngine* bgsage_mobile_create(const char* type,
         else if(t=="pair") e->base=std::make_shared<GamePlanPairStrategy>(p,h);
         else if(t=="5nn") e->base=std::make_shared<GamePlanStrategy>(p,h);
         else throw std::invalid_argument("unsupported model strategy");
-        if(!e->db.load(bearoff)) throw std::runtime_error("bearoff asset unavailable");
+        if(!*bearoff) e->db.generate(); // empty path: build the table in memory, no asset
+        else if(!e->db.load(bearoff)) throw std::runtime_error("bearoff asset unavailable");
         e->strategy=std::make_shared<BearoffStrategy>(e->base,&e->db);
         last_error.clear(); return e.release();
     } catch(const std::exception& ex) { last_error=ex.what(); return nullptr; }
@@ -80,8 +90,8 @@ extern "C" void bgsage_mobile_destroy(BgsageMobileEngine* e) { delete e; }
 extern "C" void bgsage_mobile_free(char* p) { std::free(p); }
 extern "C" const char* bgsage_mobile_last_error() { return last_error.c_str(); }
 
-extern "C" char* bgsage_mobile_analyze(BgsageMobileEngine* e, int operation,
-    const BgsageMobileRequest* request) {
+static char* analyze_request(BgsageMobileEngine* e, int operation,
+    const BgsageMobileRequest* request, const int* play) {
     try {
         if(!e || !request) throw std::invalid_argument("engine unavailable");
         const auto& r=*request; validate(r,operation);
@@ -95,6 +105,12 @@ extern "C" char* bgsage_mobile_analyze(BgsageMobileEngine* e, int operation,
         const MoveFilter filter{5,0.08f};
         if(operation==0) {
             std::vector<Board> candidates; possible_boards(board,r.die1,r.die2,candidates);
+            if(play) {
+                Board b{}; std::copy(play,play+26,b.begin());
+                if(std::find(candidates.begin(),candidates.end(),b)==candidates.end())
+                    throw std::invalid_argument("not a legal play of the roll");
+                candidates.assign(1,b);
+            }
             std::vector<Move> moves;
             for(const auto& b:candidates) {
                 check_budget(); Move m{}; m.board=b;
@@ -151,4 +167,13 @@ extern "C" char* bgsage_mobile_analyze(BgsageMobileEngine* e, int operation,
         last_error.clear(); return out;
     } catch(const std::exception& ex) { last_error=ex.what(); return nullptr; }
     catch(...) { last_error="native evaluation failed"; return nullptr; }
+}
+extern "C" char* bgsage_mobile_analyze(BgsageMobileEngine* e, int operation,
+    const BgsageMobileRequest* request) {
+    return analyze_request(e,operation,request,nullptr);
+}
+extern "C" char* bgsage_mobile_analyze_play(BgsageMobileEngine* e,
+    const BgsageMobileRequest* request, const int* play) {
+    if(!play) { last_error="play unavailable"; return nullptr; }
+    return analyze_request(e,0,request,play);
 }
