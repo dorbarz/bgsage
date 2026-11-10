@@ -915,16 +915,17 @@ struct CubefulOpenCache {
     }
 
     static std::size_t hash_board(const Board& board, int plies, int cci, bool fTop) {
-        // Fast hash: XOR board values with rotations + plies/cci/fTop
-        std::size_t h = static_cast<std::size_t>(plies) * 0x9e3779b97f4a7c15ULL;
-        h ^= static_cast<std::size_t>(cci) * 0x517cc1b727220a95ULL;
-        h ^= static_cast<std::size_t>(fTop) * 0x6c62272e07bb0142ULL;
+        // Fast hash: XOR board values with rotations + plies/cci/fTop.
+        // 64-bit on every target (a 32-bit size_t made the rotate undefined).
+        std::uint64_t h = static_cast<std::uint64_t>(plies) * 0x9e3779b97f4a7c15ULL;
+        h ^= static_cast<std::uint64_t>(cci) * 0x517cc1b727220a95ULL;
+        h ^= static_cast<std::uint64_t>(fTop) * 0x6c62272e07bb0142ULL;
         for (int i = 0; i < 26; ++i) {
-            h ^= static_cast<std::size_t>(static_cast<unsigned int>(board[i]))
-                 * (0x9e3779b97f4a7c15ULL + static_cast<std::size_t>(i) * 7);
+            h ^= static_cast<std::uint64_t>(static_cast<unsigned int>(board[i]))
+                 * (0x9e3779b97f4a7c15ULL + static_cast<std::uint64_t>(i) * 7);
             h = (h << 7) | (h >> 57);  // rotate
         }
-        return h;
+        return static_cast<std::size_t>(h);
     }
 
     // out_probs is optional: when non-null, only hit if the entry has stored

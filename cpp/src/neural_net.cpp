@@ -11,8 +11,11 @@
 #include <stdexcept>
 #include <algorithm>
 
-// Platform-specific SIMD headers
-#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+// Platform-specific SIMD headers. An Emscripten build with -mavx2 -mfma takes
+// the AVX2 path as well (translated to WebAssembly SIMD), so it computes what
+// x86 does: the other path's lookup-table sigmoid moves outputs by ~1e-4.
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86) || \
+    (defined(__EMSCRIPTEN__) && defined(__AVX2__))
   #include <immintrin.h>
   #define BGBOT_USE_AVX2 1
 #elif defined(__aarch64__) || defined(__arm64__)
